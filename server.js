@@ -9,19 +9,38 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Railway MySQL pool
-const pool = mysql.createPool({
+// Railway MySQL connection config
+const dbConfig = {
   host: process.env.DB_HOST || 'zephyr.proxy.rlwy.net',
-  port: process.env.DB_PORT || 23832,
+  port: parseInt(process.env.DB_PORT || 23832),
   user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASS || 'nwEZDdXubHQk2HxCSKkNqLQZ1adkwQ1a',
+  password: process.env.DB_PASS || 'nwEZDdWXuHQKzHxCSKWNqLQZladWwQla',
   database: process.env.DB_NAME || 'railway',
   waitForConnections: true,
-  connectionLimit: 10,
+  connectionLimit: 5,
   queueLimit: 0,
   enableKeepAlive: true,
-  keepAliveInitialDelayMs: 0
-});
+  keepAliveInitialDelayMs: 0,
+  decimalNumbers: true,
+  multipleStatements: false,
+  supportBigNumbers: true
+};
+
+let pool;
+
+async function initializePool() {
+  try {
+    pool = mysql.createPool(dbConfig);
+    const connection = await pool.getConnection();
+    console.log('✅ Successfully connected to Railway MySQL');
+    connection.release();
+  } catch (error) {
+    console.error('❌ Failed to connect to Railway MySQL:', error.message);
+    process.exit(1);
+  }
+}
+
+initializePool();
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -30,23 +49,29 @@ app.get('/health', (req, res) => {
 
 // Get player stats
 app.get('/api/stats', async (req, res) => {
+  let connection;
   try {
     const { stat = 'PVPKills', search = '', limit = 10 } = req.query;
-    const parsedLimit = limit === 'all' ? 999 : parseInt(limit) || 10;
+    const parsedLimit = limit === 'all' ? 999 : Math.min(parseInt(limit) || 10, 1000);
     
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
     
     let query = 'SELECT UserID, Name, PVPKills, Deaths, KDR, HeadShots, PVEKills, NPCKills, TimePlayed FROM playerranks';
+    let params = [];
     
     if (search && search.length > 0) {
-      const searchSafe = search.replace(/[%_\\]/g, '\\$&');
-      query += ` WHERE Name LIKE '%${searchSafe}%' ESCAPE '\\'`;
+      query += ` WHERE Name LIKE ?`;
+      params.push(`%${search}%`);
     }
     
-    query += ` ORDER BY ${stat} DESC LIMIT ${parsedLimit}`;
+    // Validate stat column to prevent SQL injection
+    const validStats = ['PVPKills', 'Deaths', 'KDR', 'HeadShots', 'PVEKills', 'NPCKills', 'TimePlayed'];
+    const safeStat = validStats.includes(stat) ? stat : 'PVPKills';
     
-    const [rows] = await connection.query(query);
-    connection.release();
+    query += ` ORDER BY ${safeStat} DESC LIMIT ?`;
+    params.push(parsedLimit);
+    
+    const [rows] = await connection.execute(query, params);
     
     // Format data
     const data = rows.map(row => ({
@@ -67,29 +92,34 @@ app.get('/api/stats', async (req, res) => {
       data: data
     });
   } catch (error) {
-    console.error('Stats API error:', error);
+    console.error('Stats API error:', error.message);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message || 'Failed to fetch stats'
     });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
 // Get top players
 app.get('/api/top', async (req, res) => {
+  let connection;
   try {
     const { stat = 'PVPKills', limit = 10 } = req.query;
-    const parsedLimit = parseInt(limit) || 10;
+    const parsedLimit = Math.min(parseInt(limit) || 10, 1000);
     
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
+    
+    const validStats = ['PVPKills', 'Deaths', 'KDR', 'HeadShots', 'PVEKills', 'NPCKills', 'TimePlayed'];
+    const safeStat = validStats.includes(stat) ? stat : 'PVPKills';
     
     const query = `SELECT UserID, Name, PVPKills, Deaths, KDR, HeadShots, PVEKills, NPCKills, TimePlayed 
                    FROM playerranks 
-                   ORDER BY ${stat} DESC 
-                   LIMIT ${parsedLimit}`;
+                   ORDER BY ${safeStat} DESC 
+                   LIMIT ?`;
     
-    const [rows] = await connection.query(query);
-    connection.release();
+    const [rows] = await connection.execute(query, [parsedLimit]);
     
     const data = rows.map((row, idx) => ({
       rank: idx + 1,
@@ -111,30 +141,35 @@ app.get('/api/top', async (req, res) => {
       data: data
     });
   } catch (error) {
-    console.error('Top API error:', error);
+    console.error('Top API error:', error.message);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message || 'Failed to fetch top players'
     });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
 // Get summary stats
 app.get('/api/summary', async (req, res) => {
+  let connection;
   try {
     const { stat = 'PVPKills' } = req.query;
     
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
+    
+    const validStats = ['PVPKills', 'Deaths', 'KDR', 'HeadShots', 'PVEKills', 'NPCKills', 'TimePlayed'];
+    const safeStat = validStats.includes(stat) ? stat : 'PVPKills';
     
     const query = `SELECT 
                      COUNT(*) as total_players,
-                     MAX(${stat}) as max_value,
-                     AVG(${stat}) as avg_value,
-                     MIN(${stat}) as min_value
+                     MAX(${safeStat}) as max_value,
+                     AVG(${safeStat}) as avg_value,
+                     MIN(${safeStat}) as min_value
                    FROM playerranks`;
     
-    const [rows] = await connection.query(query);
-    connection.release();
+    const [rows] = await connection.execute(query);
     
     const stats = rows[0];
     
@@ -149,28 +184,30 @@ app.get('/api/summary', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Summary API error:', error);
+    console.error('Summary API error:', error.message);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message || 'Failed to fetch summary'
     });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
 // Search player
 app.get('/api/player/:name', async (req, res) => {
+  let connection;
   try {
     const { name } = req.params;
     
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
     
     const query = `SELECT UserID, Name, PVPKills, Deaths, KDR, HeadShots, PVEKills, NPCKills, TimePlayed 
                    FROM playerranks 
                    WHERE Name LIKE ?
                    LIMIT 1`;
     
-    const [rows] = await connection.query(query, [`%${name}%`]);
-    connection.release();
+    const [rows] = await connection.execute(query, [`%${name}%`]);
     
     if (rows.length === 0) {
       return res.status(404).json({
@@ -196,15 +233,17 @@ app.get('/api/player/:name', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Player API error:', error);
+    console.error('Player API error:', error.message);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message || 'Failed to fetch player'
     });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
-// Error handling
+// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
   res.status(500).json({
@@ -213,10 +252,32 @@ app.use((err, req, res, next) => {
   });
 });
 
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Endpoint not found'
+  });
+});
+
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Rust Stats API running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`Database: ${process.env.DB_NAME || 'railway'}`);
+  console.log(`🚀 Rust Stats API running on port ${PORT}`);
+  console.log(`📊 Database: ${process.env.DB_NAME || 'railway'}`);
+  console.log(`🔗 Available endpoints:`);
+  console.log(`   - GET /health`);
+  console.log(`   - GET /api/stats?stat=PVPKills&limit=10&search=playerName`);
+  console.log(`   - GET /api/top?stat=PVPKills&limit=10`);
+  console.log(`   - GET /api/summary?stat=PVPKills`);
+  console.log(`   - GET /api/player/:name`);
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Shutting down...');
+  if (pool) {
+    await pool.end();
+  }
+  process.exit(0);
 });
