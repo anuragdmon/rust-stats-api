@@ -21,19 +21,21 @@ const dbConfig = {
 
 const pool = mysql.createPool(dbConfig);
 
-const validStats = ['PVPKills', 'Deaths', 'KDR', 'HeadShots', 'PVEKills', 'NPCKills', 'TimePlayed'];
+const validStats = ['PVPKills', 'Deaths', 'KDR', 'HeadShots', 'PVEKills', 'NPCKills', 'TimePlayed',
+  'Suicides', 'SleepersKilled', 'StructuresBuilt', 'ResourcesGathered', 'BulletsFired', 'HeliKills', 'APCKills'];
+
+const TABLE = process.env.TABLE_NAME || 'playerranksdb';
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Rust Stats API running' });
 });
 
-// DEBUG: list all tables in the database
 app.get('/api/tables', async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
     const [tables] = await connection.query('SHOW TABLES');
-    res.json({ success: true, tables: tables });
+    res.json({ success: true, tables });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   } finally {
@@ -41,7 +43,6 @@ app.get('/api/tables', async (req, res) => {
   }
 });
 
-// DEBUG: show columns of a given table  e.g. /api/columns/PlayerRanks
 app.get('/api/columns/:table', async (req, res) => {
   let connection;
   try {
@@ -55,13 +56,11 @@ app.get('/api/columns/:table', async (req, res) => {
   }
 });
 
-const TABLE = process.env.TABLE_NAME || 'playerranks';
-
 app.get('/api/stats', async (req, res) => {
   let connection;
   try {
     const { stat = 'PVPKills', search = '', limit = 10 } = req.query;
-    const parsedLimit = limit === 'all' ? 999 : Math.min(parseInt(limit) || 10, 1000);
+    const parsedLimit = limit === 'all' ? 1000 : Math.min(Math.max(parseInt(limit) || 10, 1), 1000);
     const safeStat = validStats.includes(stat) ? stat : 'PVPKills';
 
     connection = await pool.getConnection();
@@ -71,10 +70,9 @@ app.get('/api/stats', async (req, res) => {
       query += ' WHERE Name LIKE ?';
       params.push(`%${search}%`);
     }
-    query += ` ORDER BY \`${safeStat}\` DESC LIMIT ?`;
-    params.push(parsedLimit);
+    query += ` ORDER BY \`${safeStat}\` DESC LIMIT ${parsedLimit}`;
 
-    const [rows] = await connection.execute(query, params);
+    const [rows] = await connection.query(query, params);
     res.json({ success: true, count: rows.length, data: rows });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -112,5 +110,5 @@ app.get('/api/summary', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Rust Stats API running on port ${PORT}`);
+  console.log(`Rust Stats API running on port ${PORT}, table: ${TABLE}`);
 });
